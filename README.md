@@ -78,6 +78,8 @@
 - `sessions` 报 `无法解密 session.db`
 - `file is not a database`
 - 联系人库、会话库 schema 不匹配导致的查询失败
+- 单聊 `outgoing` 方向位判反，导致把对方消息误认成自己发出
+- 私聊文本输出里说话人不明确，看起来像整段都是对方在说
 - 常见 XML 消息预览不友好
 - 读取不到 WAL 最新消息的问题
 

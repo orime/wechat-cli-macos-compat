@@ -261,6 +261,10 @@ function formatMessagePreview(row) {
   return `[${TYPE_LABELS[kind] || `类型${row.messageType}`}]`;
 }
 
+function isOutgoingDirection(direction) {
+  return Number(direction || 0) === 0;
+}
+
 function matchTypeFilter(row, typeFilter) {
   if (!typeFilter) return true;
   return classifyMessageType(row.messageType, row.msgContent) === typeFilter;
@@ -812,20 +816,29 @@ function renderContacts(rows) {
   }).join('\n\n');
 }
 
+function resolveSpeakerLabel(target, row) {
+  if (row.sender) return row.sender;
+  if (row.outgoing) return '我';
+  const username = target.chatUsername || target.username || '';
+  if (username.endsWith('@chatroom')) return '';
+  return target.chat || target.display || target.username || '';
+}
+
 function renderHistory(chat, rows) {
   if (!rows.length) return `没有消息: ${chat.display || chat.username}`;
   return rows.map((row) => {
-    const prefix = `[${formatUnix(row.createTime)}] ${chat.display || chat.username}`;
-    const sender = row.sender ? ` ${row.sender}` : '';
-    return `${prefix}${sender}: ${row.preview}`;
+    const prefix = `[${formatUnix(row.createTime)}]`;
+    const speaker = resolveSpeakerLabel(chat, row);
+    return speaker ? `${prefix} ${speaker}: ${row.preview}` : `${prefix} ${row.preview}`;
   }).join('\n');
 }
 
 function renderSearch(rows) {
   if (!rows.length) return '没有搜索结果';
   return rows.map((row) => {
-    const sender = row.sender ? ` ${row.sender}` : '';
-    return `[${formatUnix(row.createTime)}] ${row.chat} (${row.chatUsername})${sender}: ${row.preview}`;
+    const speaker = resolveSpeakerLabel(row, row);
+    const prefix = `[${formatUnix(row.createTime)}] ${row.chat} (${row.chatUsername})`;
+    return speaker ? `${prefix} ${speaker}: ${row.preview}` : `${prefix}: ${row.preview}`;
   }).join('\n');
 }
 
@@ -923,13 +936,14 @@ function runPatched(argv) {
       type: row.kind,
       sender: row.sender,
       content: row.preview,
-      outgoing: row.direction === 1,
+      outgoing: isOutgoingDirection(row.direction),
     }));
     if (fmt === 'json') return outputJson(rows);
     return outputText(renderHistory(chat, rows.map((row) => ({
       createTime: row.timestamp,
       preview: row.content,
       sender: row.sender,
+      outgoing: row.outgoing,
     }))));
   }
 
@@ -951,7 +965,7 @@ function runPatched(argv) {
       type: row.kind,
       sender: row.sender,
       content: row.preview,
-      outgoing: row.direction === 1,
+      outgoing: isOutgoingDirection(row.direction),
     }));
     if (fmt === 'json') return outputJson(rows);
     return outputText(renderSearch(rows.map((row) => ({
@@ -960,6 +974,7 @@ function runPatched(argv) {
       createTime: row.timestamp,
       sender: row.sender,
       preview: row.content,
+      outgoing: row.outgoing,
     }))));
   }
 
@@ -981,7 +996,7 @@ function runPatched(argv) {
       type: row.kind,
       sender: row.sender,
       content: row.preview,
-      outgoing: row.direction === 1,
+      outgoing: isOutgoingDirection(row.direction),
     }));
     if (fmt === 'json') return outputJson(normalized);
     return outputText(renderSearch(normalized.map((row) => ({
@@ -990,6 +1005,7 @@ function runPatched(argv) {
       createTime: row.timestamp,
       sender: row.sender,
       preview: row.content,
+      outgoing: row.outgoing,
     }))));
   }
 }
@@ -1003,4 +1019,14 @@ function main() {
   }
 }
 
-main();
+if (require.main === module) {
+  main();
+}
+
+module.exports = {
+  main,
+  isOutgoingDirection,
+  resolveSpeakerLabel,
+  renderHistory,
+  renderSearch,
+};
