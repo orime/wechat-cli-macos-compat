@@ -2,12 +2,17 @@
   "name": "wechat-cli-macos-compat",
   "version": "0.1.0",
   "description": "A macOS compatibility fork for wechat-cli with alternate WeChat DB layout, decryption, and schema support.",
+  "scripts": {
+    "setup-compat-dir": "node scripts/setup-compat-dir.js",
+    "test": "node --test test/*.test.js"
+  },
   "bin": {
     "wechat-cli": "bin/wechat-cli.js"
   },
   "files": [
     "bin/",
-    "README.md"
+    "README.md",
+    "scripts/"
   ],
   "optionalDependencies": {
     "@canghe_ai/wechat-cli-darwin-arm64": "0.2.4",
