@@ -208,6 +208,174 @@ function extractXmlDigest(content) {
   return match[1].replace(/<!\[CDATA\[|\]\]>/g, '').trim();
 }
 
+function toUtf8Text(value) {
+  if (value == null) return '';
+  if (Buffer.isBuffer(value)) {
+    return value.toString('utf8').replace(/\u0000/g, '').replace(/\r/g, '');
+  }
+  if (value instanceof Uint8Array) {
+    return Buffer.from(value).toString('utf8').replace(/\u0000/g, '').replace(/\r/g, '');
+  }
+  return String(value).replace(/\u0000/g, '').replace(/\r/g, '');
+}
+
+function decodeXmlEntities(value) {
+  return String(value == null ? '' : value)
+    .replace(/&lt;/g, '<')
+    .replace(/&gt;/g, '>')
+    .replace(/&quot;/g, '"')
+    .replace(/&#39;/g, '\'')
+    .replace(/&amp;/g, '&');
+}
+
+function extractXmlTag(content, tagName) {
+  if (!content || !tagName) return '';
+  const match = decodeXmlEntities(String(content)).match(new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, 'i'));
+  if (!match) return '';
+  return normalizeText(match[1].replace(/<!\[CDATA\[|\]\]>/g, ''));
+}
+
+function extractAllXmlTagValues(content, tagName) {
+  if (!content || !tagName) return [];
+  const values = [];
+  const regex = new RegExp(`<${tagName}>([\\s\\S]*?)<\\/${tagName}>`, 'ig');
+  const decoded = decodeXmlEntities(String(content));
+  let match;
+  while ((match = regex.exec(decoded))) {
+    const value = normalizeText(match[1].replace(/<!\[CDATA\[|\]\]>/g, ''));
+    if (value) values.push(value);
+  }
+  return values;
+}
+
+function extractAtUsernames(msgSource) {
+  const raw = extractXmlTag(msgSource, 'atuserlist');
+  if (!raw) return [];
+  return raw
+    .split(',')
+    .map((part) => normalizeText(part))
+    .filter(Boolean);
+}
+
+function extractMentionDisplayNames(content) {
+  if (!content) return [];
+  const names = [];
+  const regex = /@([^\n\r@]+?)(?=[\u2005\s]|$)/g;
+  let match;
+  while ((match = regex.exec(content))) {
+    const value = normalizeText(match[1]);
+    if (value && value !== '所有人') names.push(value);
+  }
+  return names;
+}
+
+function extractGroupRawSender(content) {
+  const text = normalizeText(content);
+  const index = text.indexOf(':\n');
+  if (index <= 0 || index >= 80) {
+    return { rawSender: '', body: text };
+  }
+  const rawSender = text.slice(0, index);
+  if (!/^[a-zA-Z0-9_@.-]+$/.test(rawSender)) {
+    return { rawSender: '', body: text };
+  }
+  return {
+    rawSender,
+    body: text.slice(index + 2),
+  };
+}
+
+function extractRoomDataMembers(sessionInfo) {
+  const text = toUtf8Text(sessionInfo);
+  const match = text.match(/<RoomData[\s\S]*?<\/RoomData>/i);
+  const result = {
+    members: [],
+    displayMap: new Map(),
+  };
+  if (!match) return result;
+  const memberRegex = /<Member\b[^>]*\bUserName="([^"]+)"[^>]*>([\s\S]*?)<\/Member>/ig;
+  let memberMatch;
+  while ((memberMatch = memberRegex.exec(match[0]))) {
+    const username = normalizeText(decodeXmlEntities(memberMatch[1]));
+    if (!username) continue;
+    result.members.push(username);
+    const display = extractXmlTag(memberMatch[2], 'DisplayName');
+    if (display) {
+      result.displayMap.set(username, display);
+    }
+  }
+  return result;
+}
+
+function extractReplyDisplayEntries(content, chatUsername) {
+  const entries = [];
+  const decoded = decodeXmlEntities(toUtf8Text(content));
+  const blocks = [];
+  const regex = /<refermsg>([\s\S]*?)<\/refermsg>/ig;
+  let match;
+  while ((match = regex.exec(decoded))) {
+    blocks.push(match[1]);
+  }
+  if (!blocks.length) blocks.push(decoded);
+  for (const block of blocks) {
+    if (extractXmlTag(block, 'fromusr') !== chatUsername) continue;
+    const username = extractXmlTag(block, 'chatusr');
+    const display = extractXmlTag(block, 'displayname');
+    if (username && display) {
+      entries.push({ username, display });
+    }
+  }
+  return entries;
+}
+
+function extractRecordSourceItems(content, chatUsername) {
+  const items = [];
+  const decoded = decodeXmlEntities(toUtf8Text(content));
+  const regex = /<dataitem\b[^>]*>([\s\S]*?)<\/dataitem>/ig;
+  let match;
+  while ((match = regex.exec(decoded))) {
+    const block = match[1];
+    if (extractXmlTag(block, 'srcChatname') !== chatUsername) continue;
+    const sourceName = extractXmlTag(block, 'sourcename');
+    const srcMsgLocalId = toInt(extractXmlTag(block, 'srcMsgLocalid'), null);
+    if (sourceName && Number.isFinite(srcMsgLocalId)) {
+      items.push({ sourceName, srcMsgLocalId });
+    }
+  }
+  return items;
+}
+
+function extractSysmsgMemberEntries(content) {
+  const entries = [];
+  const decoded = decodeXmlEntities(toUtf8Text(content));
+  const memberRegex = /<member>([\s\S]*?)<\/member>/ig;
+  let match;
+  while ((match = memberRegex.exec(decoded))) {
+    const block = match[1];
+    const username = extractXmlTag(block, 'username');
+    const display = extractXmlTag(block, 'nickname');
+    if (username && display) {
+      entries.push({ username, display });
+    }
+  }
+  return entries;
+}
+
+function applyAlias(aliases, username, display, priority) {
+  const normalizedUsername = normalizeText(username);
+  const normalizedDisplay = normalizeText(display);
+  if (!normalizedUsername || !normalizedDisplay || normalizedDisplay === '所有人') {
+    return;
+  }
+  const current = aliases.get(normalizedUsername);
+  if (!current || Number(priority || 0) >= Number(current.priority || 0)) {
+    aliases.set(normalizedUsername, {
+      display: normalizedDisplay,
+      priority: Number(priority || 0),
+    });
+  }
+}
+
 function normalizeText(value) {
   return String(value == null ? '' : value)
     .replace(/\u0000/g, '')
@@ -424,6 +592,11 @@ class App {
     this.contacts = null;
     this.sessionCandidates = null;
     this.chatLookup = new Map();
+    this.groupMemberLookup = new Map();
+    this.groupRosterLookup = new Map();
+    this.groupMessageSenderLookup = new Map();
+    this.messageIdColumnLookup = new Map();
+    this.tableColumnsLookup = new Map();
   }
 
   ensureReady() {
@@ -448,9 +621,17 @@ class App {
       return outPath;
     }
     const encKey = Buffer.from(info.enc_key, 'hex');
-    fullDecrypt(src, outPath, encKey);
-    if (fs.existsSync(wal) && fs.statSync(wal).size > 32) {
-      decryptWal(wal, outPath, encKey);
+    const tempPath = `${outPath}.${process.pid}.${Date.now()}.tmp`;
+    try {
+      fullDecrypt(src, tempPath, encKey);
+      if (fs.existsSync(wal) && fs.statSync(wal).size > 32) {
+        decryptWal(wal, tempPath, encKey);
+      }
+      fs.renameSync(tempPath, outPath);
+    } finally {
+      if (fs.existsSync(tempPath)) {
+        fs.unlinkSync(tempPath);
+      }
     }
     this.cacheMeta[relKey] = { dbMt, walMt, path: outPath };
     saveJson(MTIME_FILE, this.cacheMeta);
@@ -512,6 +693,180 @@ class App {
   getContactDisplay(username) {
     const contact = this.loadContacts().byUsername.get(username);
     return contact ? contact.display : '';
+  }
+
+  getMessageDbRelKeys() {
+    return Object.keys(this.keys)
+      .filter((key) => key.startsWith('message/') && key.endsWith('.db'))
+      .sort();
+  }
+
+  getMessageLocalIdColumn(location) {
+    const cacheKey = `${location.dbPath}:${location.table}`;
+    if (this.messageIdColumnLookup.has(cacheKey)) {
+      return this.messageIdColumnLookup.get(cacheKey);
+    }
+    const db = this.createDb(location.dbPath);
+    try {
+      const rows = db.prepare(`PRAGMA table_info(${escapeIdent(location.table)})`).all();
+      const match = rows.find((row) => ['mesLocalID', 'localId', 'msgLocalID'].includes(row.name))
+        || rows.find((row) => ['meslocalid', 'localid', 'msglocalid'].includes(String(row.name).toLowerCase()));
+      const column = match ? match.name : null;
+      this.messageIdColumnLookup.set(cacheKey, column);
+      return column;
+    } finally {
+      db.close();
+    }
+  }
+
+  getTableColumns(db, dbPath, tableName) {
+    const cacheKey = `${dbPath}:${tableName}`;
+    if (this.tableColumnsLookup.has(cacheKey)) {
+      return this.tableColumnsLookup.get(cacheKey);
+    }
+    const columns = db.prepare(`PRAGMA table_info(${escapeIdent(tableName)})`).all().map((row) => row.name);
+    this.tableColumnsLookup.set(cacheKey, columns);
+    return columns;
+  }
+
+  getGroupRoster(chatUsername) {
+    if (this.groupRosterLookup.has(chatUsername)) {
+      return this.groupRosterLookup.get(chatUsername);
+    }
+    const session = this.getSessionCandidates().find((row) => row.username === chatUsername);
+    const roster = session ? extractRoomDataMembers(session.sessionInfo) : { members: [], displayMap: new Map() };
+    this.groupRosterLookup.set(chatUsername, roster);
+    return roster;
+  }
+
+  buildGroupMessageSenderMap(chatUsername) {
+    if (this.groupMessageSenderLookup.has(chatUsername)) {
+      return this.groupMessageSenderLookup.get(chatUsername);
+    }
+    const location = this.findChatTable(chatUsername);
+    const senderByLocalId = new Map();
+    if (!location) {
+      this.groupMessageSenderLookup.set(chatUsername, senderByLocalId);
+      return senderByLocalId;
+    }
+    const localIdColumn = this.getMessageLocalIdColumn(location);
+    if (!localIdColumn) {
+      this.groupMessageSenderLookup.set(chatUsername, senderByLocalId);
+      return senderByLocalId;
+    }
+    const db = this.createDb(location.dbPath);
+    try {
+      const rows = db.prepare(`
+        SELECT ${escapeIdent(localIdColumn)} AS localId, msgContent
+        FROM ${escapeIdent(location.table)}
+        WHERE msgContent IS NOT NULL
+      `).all();
+      for (const row of rows) {
+        const localId = Number(row.localId);
+        if (!Number.isFinite(localId)) continue;
+        const { rawSender } = extractGroupRawSender(row.msgContent);
+        if (rawSender && !senderByLocalId.has(localId)) {
+          senderByLocalId.set(localId, rawSender);
+        }
+      }
+    } finally {
+      db.close();
+    }
+    this.groupMessageSenderLookup.set(chatUsername, senderByLocalId);
+    return senderByLocalId;
+  }
+
+  collectLocalGroupAliases(chatUsername, aliases) {
+    const location = this.findChatTable(chatUsername);
+    if (!location) return;
+    const db = this.createDb(location.dbPath);
+    try {
+      const rows = db.prepare(`
+        SELECT msgContent, msgSource
+        FROM ${escapeIdent(location.table)}
+        WHERE msgContent IS NOT NULL
+          AND (
+            msgContent LIKE ?
+            OR msgContent LIKE ?
+            OR msgContent LIKE ?
+            OR msgSource LIKE ?
+          )
+      `).all('%<refermsg>%', '%<displayname>%', '%<memberlist>%', '%atuserlist%');
+      for (const row of rows) {
+        for (const entry of extractReplyDisplayEntries(row.msgContent, chatUsername)) {
+          applyAlias(aliases, entry.username, entry.display, 50);
+        }
+        for (const entry of extractSysmsgMemberEntries(row.msgContent)) {
+          applyAlias(aliases, entry.username, entry.display, 35);
+        }
+        const atUsers = extractAtUsernames(row.msgSource);
+        const atNames = extractMentionDisplayNames(toUtf8Text(row.msgContent));
+        const pairCount = Math.min(atUsers.length, atNames.length);
+        for (let i = 0; i < pairCount; i += 1) {
+          applyAlias(aliases, atUsers[i], atNames[i], 30);
+        }
+      }
+    } finally {
+      db.close();
+    }
+  }
+
+  collectCrossDbGroupAliases(chatUsername, aliases, senderByLocalId) {
+    const relKeys = this.getMessageDbRelKeys();
+    const like = `%${chatUsername}%`;
+    for (const relKey of relKeys) {
+      const dbPath = this.getDecryptedPath(relKey);
+      if (!dbPath) continue;
+      const db = this.createDb(dbPath);
+      try {
+        const tables = db.prepare('SELECT name FROM sqlite_master WHERE type = ? AND name LIKE ?').all('table', 'Chat_%');
+        for (const tableRow of tables) {
+          if (tableRow.name.endsWith('_dels')) continue;
+          const columns = this.getTableColumns(db, dbPath, tableRow.name);
+          if (!columns.includes('msgContent')) continue;
+          const rows = db.prepare(`
+            SELECT msgContent
+            FROM ${escapeIdent(tableRow.name)}
+            WHERE msgContent IS NOT NULL AND msgContent LIKE ?
+          `).all(like);
+          for (const row of rows) {
+            for (const entry of extractReplyDisplayEntries(row.msgContent, chatUsername)) {
+              applyAlias(aliases, entry.username, entry.display, 50);
+            }
+            for (const item of extractRecordSourceItems(row.msgContent, chatUsername)) {
+              const rawSender = senderByLocalId.get(item.srcMsgLocalId);
+              if (rawSender) {
+                applyAlias(aliases, rawSender, item.sourceName, 40);
+              }
+            }
+          }
+        }
+      } finally {
+        db.close();
+      }
+    }
+  }
+
+  buildGroupMemberDisplayMap(chatUsername) {
+    const aliases = new Map();
+    const roster = this.getGroupRoster(chatUsername);
+    for (const [username, display] of roster.displayMap.entries()) {
+      applyAlias(aliases, username, display, 10);
+    }
+    const senderByLocalId = this.buildGroupMessageSenderMap(chatUsername);
+    this.collectLocalGroupAliases(chatUsername, aliases);
+    this.collectCrossDbGroupAliases(chatUsername, aliases, senderByLocalId);
+    return new Map(Array.from(aliases.entries()).map(([username, meta]) => [username, meta.display]));
+  }
+
+  getGroupMemberDisplay(chatUsername, memberUsername) {
+    const contactDisplay = this.getContactDisplay(memberUsername);
+    if (contactDisplay) return contactDisplay;
+    if (!this.groupMemberLookup.has(chatUsername)) {
+      this.groupMemberLookup.set(chatUsername, this.buildGroupMemberDisplayMap(chatUsername));
+    }
+    const aliases = this.groupMemberLookup.get(chatUsername);
+    return aliases.get(memberUsername) || '';
   }
 
   getSessionCandidates() {
@@ -611,9 +966,7 @@ class App {
   findChatTable(username) {
     if (this.chatLookup.has(username)) return this.chatLookup.get(username);
     const table = `Chat_${md5hex(username)}`;
-    const relKeys = Object.keys(this.keys)
-      .filter((key) => key.startsWith('message/') && key.endsWith('.db'))
-      .sort();
+    const relKeys = this.getMessageDbRelKeys();
     for (const relKey of relKeys) {
       const dbPath = this.getDecryptedPath(relKey);
       if (!dbPath) continue;
@@ -638,13 +991,10 @@ class App {
     let content = normalizeText(row.msgContent);
     let sender = '';
     if (isGroup) {
-      const index = content.indexOf(':\n');
-      if (index > 0 && index < 80) {
-        const rawSender = content.slice(0, index);
-        if (/^[a-zA-Z0-9_@.-]+$/.test(rawSender)) {
-          sender = this.getContactDisplay(rawSender) || rawSender;
-          content = content.slice(index + 2);
-        }
+      const parsed = extractGroupRawSender(content);
+      if (parsed.rawSender) {
+        sender = this.getGroupMemberDisplay(username, parsed.rawSender) || parsed.rawSender;
+        content = parsed.body;
       }
     }
     const normalized = {
@@ -659,7 +1009,7 @@ class App {
     normalized.kind = classifyMessageType(normalized.messageType, normalized.rawContent);
     normalized.preview = formatMessagePreview({
       messageType: normalized.messageType,
-      msgContent: normalized.rawContent,
+      msgContent: normalized.content,
     });
     return normalized;
   }
@@ -1029,4 +1379,9 @@ module.exports = {
   resolveSpeakerLabel,
   renderHistory,
   renderSearch,
+  extractRoomDataMembers,
+  extractReplyDisplayEntries,
+  extractRecordSourceItems,
+  extractSysmsgMemberEntries,
+  applyAlias,
 };
